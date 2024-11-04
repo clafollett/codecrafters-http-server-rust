@@ -1,6 +1,15 @@
 #[allow(unused_imports)]
-use std::io::{Read, Write};
+use std::io::{Error, Read, Write};
 use std::net::{TcpListener, TcpStream};
+
+const CRLF: &str = "\r\n";
+// const CRLF_CRLF: &str = "\r\n\r\n";
+
+const MSG_OK: &str = "OK";
+const MSG_NOT_FOUND: &str = "Not Found";
+const MSG_BAD_REQUEST: &str = "Bad Request";
+
+const ROUTE_ECHO: &str = "/echo/";
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
@@ -17,8 +26,36 @@ fn main() {
     }
 }
 
-fn format_response(status_code: u16, status_message: &str) -> String {
-    format!("HTTP/1.1 {} {}\r\n\r\n", status_code, status_message)
+fn build_response(status_code: u16, status_message: &str, response_headers: Option<Vec<String>>, body: Option<&str>) -> String {
+    let response_line = format!("HTTP/1.1 {} {}{CRLF}", status_code, status_message);
+
+    let mut headers = match response_headers {
+        Some(value) => value,
+        None => vec![]
+    };
+
+    let mut header_lines= String::new();
+
+    let body_content = match body {
+        Some(value) => value,
+        None => ""
+    };
+
+    if body_content.len() > 0 {
+        let content_length_header = format!("Content-Length: {}", body_content.len());
+        headers.push(content_length_header);
+    }
+
+    for header in headers {
+        header_lines.push_str(&header);
+        header_lines.push_str(CRLF);
+    }
+
+    if header_lines.len() > 0 {
+        header_lines.push_str(CRLF);
+    }   
+    
+    return format!("{response_line}{header_lines}{body_content}");
 }
 
 fn handle_request(mut stream: TcpStream) -> Result<(), std::io::Error> {
@@ -35,7 +72,7 @@ fn handle_request(mut stream: TcpStream) -> Result<(), std::io::Error> {
     if request_envelop_items.len() > 0 {
         println!("HTTP Request: {:?}", request_envelop_items);
 
-        let request_line_parts: Vec<&str> = request_envelop_items[0].split(' ').collect();
+        let request_line_parts: Vec<&str> = request_envelop_items[0].split(" ").collect();
         let http_method = request_line_parts[0];
         let target_path = request_line_parts[1];
         let http_version = request_line_parts[2];
@@ -61,7 +98,7 @@ fn handle_request(mut stream: TcpStream) -> Result<(), std::io::Error> {
     return Ok(())
 }
 
-fn read_request_data(stream: &mut TcpStream) -> Result<String, Result<(), std::io::Error>> {
+fn read_request_data(stream: &mut TcpStream) -> Result<String, Result<(), Error>> {
     const BUFFER_SIZE: usize = 512;
 
     let mut request_buffer = [0; BUFFER_SIZE];
@@ -95,25 +132,38 @@ fn handle_get(target_path: &str, _http_version: &str, stream: TcpStream) {
     match target_path {
         "/" => {
             handle_ok(stream);
-        }
+        },
+        path if path.starts_with(ROUTE_ECHO) => {
+            handle_echo(path, stream);
+        },
         _ => {
             handle_not_found(stream);
         }
     }
 }
 
+fn handle_echo(path: &str, mut stream: TcpStream) {
+    let echo_message = path.get(ROUTE_ECHO.len()..).unwrap();
+    let headers = vec!["Content-Type: text/plain".to_string()];
+    let response = build_response(200, MSG_OK, Some(headers), Some(&echo_message));
+        
+    println!("HTTP Response:\r\n\r\n{}", response);
+    
+    stream.write_all(response.as_bytes()).unwrap();
+}
+
 fn handle_bad_request(mut stream: TcpStream) {
-    let response = format_response(400, "Bad Request");
+    let response = build_response(400, MSG_BAD_REQUEST, None, None);
     stream.write_all(response.as_bytes()).unwrap();
 }
 
 fn handle_not_found(mut stream: TcpStream) {
-    let response = format_response(404, "Not Found");
+    let response = build_response(404, MSG_NOT_FOUND, None, None);
     stream.write_all(response.as_bytes()).unwrap();
 }
 
 fn handle_ok(mut stream: TcpStream) {
-    let response = format_response(200, "OK");
+    let response = build_response(200, MSG_OK, None, None);
     stream.write_all(response.as_bytes()).unwrap();
 }
 
