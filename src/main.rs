@@ -51,9 +51,7 @@ fn build_response(status_code: u16, status_message: &str, response_headers: Opti
         header_lines.push_str(CRLF);
     }
 
-    if header_lines.len() > 0 {
-        header_lines.push_str(CRLF);
-    }   
+    header_lines.push_str(CRLF);
     
     return format!("{response_line}{header_lines}{body_content}");
 }
