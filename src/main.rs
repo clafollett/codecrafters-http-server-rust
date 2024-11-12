@@ -1,11 +1,14 @@
 #[allow(unused_imports)]
 mod http;
+mod threadpool;
 
 use crate::http::{
     HttpHeader,
     HttpRequest,
     HttpResponse
 };
+
+use crate::threadpool::ThreadPool;
 
 use std::io::{
     BufRead,
@@ -22,8 +25,8 @@ use std::net::{
 };
 
 use std::time::Duration;
+
 use std::vec;
-//use std::str::from_utf8;
 
 const CRLF: &str = "\r\n";
 
@@ -39,6 +42,7 @@ const ROUTE_USER_AGENT: &str = "/user-agent";
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+    let pool = ThreadPool::new(4);
     
     for stream in listener.incoming() {
         match stream {
@@ -46,7 +50,9 @@ fn main() {
                 println!("New connection accepted....");
                 stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
 
-                handle_request(stream).unwrap();
+                pool.queue(move || {
+                    handle_request(stream).unwrap();
+                });
             }
             Err(e) => {
                 println!("error: {}", e);

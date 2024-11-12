@@ -15,8 +15,7 @@ set -e # Exit early if any commands fail
 (
   cd "$(dirname "$0")" # Ensure compile steps are run within the repository directory
 
-  build_dir="./.bin"
-  mkdir -p build_dir
-  #cargo clean --target-dir=$build_dir  
+  build_dir="./bin"
+  #cargo clean --target-dir=$build_dir
   cargo build --target-dir=$build_dir --manifest-path Cargo.toml
 )

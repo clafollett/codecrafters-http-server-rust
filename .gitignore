@@ -10,4 +10,4 @@ target/
 *.pdb
 
 # Local build path
-.bin
+/bin
