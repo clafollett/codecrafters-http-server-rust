@@ -20,10 +20,14 @@ impl ThreadPool {
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
-        return ThreadPool {
+        let pool = ThreadPool {
             workers,
             sender
         };
+
+        print!("ThreadPool created: size={}\n", pool.workers.len());
+
+        return pool;
     }
 
     pub fn queue<F>(&self, f: F)
@@ -37,19 +41,25 @@ impl ThreadPool {
 
 struct Worker {
     id: usize,
-    thread: JoinHandle<Arc<Mutex<Receiver<Task>>>>,
+    handle: JoinHandle<Arc<Mutex<Receiver<Task>>>>,
 }
 
 impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<Receiver<Task>>>) -> Worker {
-        let thread = thread::spawn(move || loop {
+        let handle = thread::spawn(move || loop {
             let task = receiver.lock().unwrap().recv().unwrap();
-
-            print!("Worker {id} started a new task\n");
             task();
         });
 
-        Worker { id, thread }
+        let worker = Worker { id, handle };
+
+        print!(
+            "Worker {}:{} started a new task\n",
+            worker.id,
+            worker.handle.thread().name().unwrap()
+        );
+
+        return worker;
     }
 }
 
