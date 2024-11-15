@@ -12,6 +12,11 @@ pub const HDR_USER_AGENT: &'static str = "User-Agent";
 pub const CT_TEXT_PLAIN: &'static str = "text/plain";
 pub const CT_APP_OCTET_STREAM: &'static str = "application/octet-stream";
 
+pub const METHOD_GET: &'static str = "GET";
+pub const METHOD_POST: &'static str = "POST";
+// pub const METHOD_PUT: &'static str = "PUT";
+// pub const METHOD_DELETE: &'static str = "DELETE";
+
 #[derive(Clone)]
 #[derive(Debug)]
 pub struct HttpHeader {

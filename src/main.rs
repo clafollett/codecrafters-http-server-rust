@@ -40,6 +40,7 @@ use std::{
 const CRLF: &str = "\r\n";
 
 const MSG_OK: &str = "OK";
+const MSG_CREATED: &str = "Created";
 const MSG_BAD_REQUEST: &str = "Bad Request";
 const MSG_INTERNAL_SERVER_ERROR: &str = "Internal Server Error";
 const MSG_NOT_FOUND: &str = "Not Found";
@@ -113,11 +114,8 @@ fn handle_request(stream: &TcpStream, file_directory: &PathBuf) -> std::io::Resu
     );
 
     return match context.request.method.as_str() {
-        "GET" => handle_get(&mut context),
-        // "POST" => {
-        //     let response = format!("HTTP/1.1 200 OK\r\n\r\n{}", body);
-        //     stream.write_all(response.as_bytes()).unwrap();
-        // }
+        http::METHOD_GET => handle_get(&mut context),
+        http::METHOD_POST => handle_post(&mut context),
         _ => {
             let response = HttpResponse::new(405, MSG_METHOD_NOT_ALLOWED, None, None).to_bytes();
             return stream.write_all(&response);
@@ -126,12 +124,14 @@ fn handle_request(stream: &TcpStream, file_directory: &PathBuf) -> std::io::Resu
 }
 
 fn read_request_from_stream(stream: &mut TcpStream) -> Result<HttpRequest, Error> {
-    let meta = read_meta(stream)?;
+    let mut reader = BufReader::new(stream);
+    let meta = read_meta(&mut reader)?;
+
+    assert!(meta.len() > 0);
+
     let request_line_parts: Vec<&str> = meta[0].split(" ").collect();
 
-    if request_line_parts.len() != 3 {
-        return Err(Error::new(ErrorKind::InvalidInput, "Request line is invalid"));
-    }
+    assert!(request_line_parts.len() == 3);
 
     let method = request_line_parts[0].to_string();
     let path = request_line_parts[1].to_string();
@@ -147,13 +147,15 @@ fn read_request_from_stream(stream: &mut TcpStream) -> Result<HttpRequest, Error
     }).collect();
 
     let mut body: Option<Vec::<u8>> = None;
-    let content_length_header = headers.iter().find(|h| h.name.to_lowercase() == http::HDR_CONTENT_LENGTH);
+    let content_length_header = headers.iter().find(
+        |h| h.name.to_lowercase() == http::HDR_CONTENT_LENGTH.to_lowercase()
+    );
 
     if let Some(header) = content_length_header {
         let content_length = header.value.parse::<usize>().unwrap();
         let mut buffer = vec![0; content_length];
-
-        stream.read_exact(&mut buffer)?;
+        
+        reader.read_exact(&mut buffer)?;
         body = Some(buffer);
     }
 
@@ -183,9 +185,8 @@ HTTP Request:
     return Ok(request);
 }
 
-fn  read_meta(stream: &mut TcpStream) -> Result<Vec<String>, Error> {
+fn  read_meta(reader: &mut BufReader<&mut TcpStream>) -> Result<Vec<String>, Error> {
     let mut meta = Vec::<String>::new();
-    let mut reader = BufReader::new(stream.try_clone()?);
     
     loop {
         let mut meta_line = String::with_capacity(128);
@@ -198,6 +199,7 @@ fn  read_meta(stream: &mut TcpStream) -> Result<Vec<String>, Error> {
                     break;
                 }
 
+                // Make sure to trim the trailing CRLF from the header
                 meta.push(meta_line.trim_end_matches(CRLF).to_string());
             },
             Err(e) => return Err(e)
@@ -212,7 +214,14 @@ fn handle_get(context: &mut HttpRequestContext) -> std::io::Result<()> {
         ROUTE_HOME => handle_home(context),
         ROUTE_USER_AGENT => handle_user_agent(context),
         path if path.starts_with(ROUTE_ECHO) => handle_echo(context),
-        path if path.starts_with(ROUTE_FILES) => handle_files(context),
+        path if path.starts_with(ROUTE_FILES) => handle_get_file(context),
+        _ => handle_not_found(context)
+    }
+}
+
+fn handle_post(context: &mut HttpRequestContext) -> std::io::Result<()> {
+    return match context.request.path.as_str() {
+        path if path.starts_with(ROUTE_FILES) => handle_post_file(context),
         _ => handle_not_found(context)
     }
 }
@@ -242,7 +251,7 @@ fn handle_error(stream: &mut TcpStream, error: &Error) -> std::io::Result<()> {
     return stream.write_all(&response);
 }
 
-fn handle_files(context: &mut HttpRequestContext) -> std::io::Result<()> {
+fn handle_get_file(context: &mut HttpRequestContext) -> std::io::Result<()> {
     let file_name = match context.request.path.get(ROUTE_FILES.len()..) {
         Some(f) => f,
         None => ""
@@ -257,6 +266,30 @@ fn handle_files(context: &mut HttpRequestContext) -> std::io::Result<()> {
     let file_bytes = fs::read(&file_path).unwrap();
     let headers = [HttpHeader::new(&http::HDR_CONTENT_TYPE, http::CT_APP_OCTET_STREAM)];
     let response = HttpResponse::new(200, MSG_OK, Some(&headers), Some(&file_bytes)).to_bytes();
+
+    return context.stream.write_all(&response);
+}
+
+fn handle_post_file(context: &mut HttpRequestContext) -> std::io::Result<()> {
+    let file_name = match context.request.path.get(ROUTE_FILES.len()..) {
+        Some(f) => f,
+        None => ""
+    };
+
+    let file_path = context.file_directory.join(file_name);
+
+    if file_path.exists() {
+        // TODO: Handle the remove_file error better here
+        fs::remove_file(&file_path).unwrap();
+    }
+
+    if context.request.body.is_some() {
+        // TODO: Handle potential errors better here
+        let body = context.request.body.as_ref().unwrap();
+        fs::write(file_path, body).unwrap();
+    }
+
+    let response = HttpResponse::new(201, MSG_CREATED, None, None).to_bytes();
 
     return context.stream.write_all(&response);
 }
