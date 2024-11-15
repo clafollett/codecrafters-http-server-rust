@@ -1,32 +1,41 @@
-#[allow(unused_imports)]
+//#[allow(unused_imports)]
 mod http;
 mod threadpool;
 
 use crate::http::{
     HttpHeader,
     HttpRequest,
+    HttpRequestContext,
     HttpResponse
 };
 
 use crate::threadpool::ThreadPool;
 
-use std::io::{
-    BufRead,
-    BufReader,
-    Error,
-    ErrorKind,
-    Read,
-    Write
+use clap::Parser;
+
+use std::{
+    self,
+    env,
+    fs,
+    io::{
+        BufRead,
+        BufReader,
+        Error,
+        ErrorKind,
+        Read,
+        Write
+    },
+    net::{
+        TcpListener,
+        TcpStream
+    },
+    path::{
+        Path,
+        PathBuf
+    },
+    time::Duration,
+    vec
 };
-
-use std::net::{
-    TcpListener,
-    TcpStream
-};
-
-use std::time::Duration;
-
-use std::vec;
 
 const CRLF: &str = "\r\n";
 
@@ -36,33 +45,57 @@ const MSG_INTERNAL_SERVER_ERROR: &str = "Internal Server Error";
 const MSG_NOT_FOUND: &str = "Not Found";
 const MSG_METHOD_NOT_ALLOWED: &str = "Method Not Allowed";
 
-const ROUTE_HOME: &str = "/";
 const ROUTE_ECHO: &str = "/echo/";
+const ROUTE_FILES: &str = "/files/";
+const ROUTE_HOME: &str = "/";
 const ROUTE_USER_AGENT: &str = "/user-agent";
 
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Name of the root file server directory
+    #[arg(short, long)]
+    directory: Option<String>
+}
+
 fn main() {
+    let args = Args::parse();
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
     let pool = ThreadPool::new(4);
-    
+    let current_dir = env::current_dir().unwrap();
+    let file_directory = match args.directory {
+        Some(v) => Path::new(&v).to_path_buf(),
+        None => current_dir.join("file_directory")
+    };
+
+    if file_directory.try_exists().is_err() {
+        fs::create_dir(&file_directory).unwrap();
+    }
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 println!("New connection accepted....");
+                let file_directory = file_directory.clone();
+
+                // TODO: Make timeout configurable
                 stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
 
                 pool.queue(move || {
-                    handle_request(stream).unwrap();
+                    handle_request(&stream, &file_directory).unwrap();
                 });
             }
             Err(e) => {
+                // TODO: Need to handle potential errors better here
                 println!("error: {}", e);
             }
         }
     }
 }
 
-fn handle_request(stream: TcpStream) -> std::io::Result<()> {
-    let mut stream = stream;
+fn handle_request(stream: &TcpStream, file_directory: &PathBuf) -> std::io::Result<()> {
+    let mut stream = stream.try_clone().unwrap();
     let request_result = read_request_from_stream(&mut stream);
     
     if request_result.is_err() {
@@ -73,16 +106,20 @@ fn handle_request(stream: TcpStream) -> std::io::Result<()> {
         }
     };
 
-    let request = request_result.unwrap();
+    let mut context = HttpRequestContext::new(
+        &stream,
+        file_directory,
+        &request_result.unwrap()
+    );
 
-    return match request.method.as_str() {
-        "GET" => handle_get(&request, &mut stream),
+    return match context.request.method.as_str() {
+        "GET" => handle_get(&mut context),
         // "POST" => {
         //     let response = format!("HTTP/1.1 200 OK\r\n\r\n{}", body);
         //     stream.write_all(response.as_bytes()).unwrap();
         // }
         _ => {
-            let response = HttpResponse::new(405, MSG_METHOD_NOT_ALLOWED).to_bytes();
+            let response = HttpResponse::new(405, MSG_METHOD_NOT_ALLOWED, None, None).to_bytes();
             return stream.write_all(&response);
         }
     };
@@ -109,15 +146,15 @@ fn read_request_from_stream(stream: &mut TcpStream) -> Result<HttpRequest, Error
         return header.unwrap();
     }).collect();
 
-    let mut body = Vec::<u8>::new();
-    let content_length_header = headers.iter().find(|h| h.name.to_lowercase() == "content-length");
+    let mut body: Option<Vec::<u8>> = None;
+    let content_length_header = headers.iter().find(|h| h.name.to_lowercase() == http::HDR_CONTENT_LENGTH);
 
     if let Some(header) = content_length_header {
         let content_length = header.value.parse::<usize>().unwrap();
         let mut buffer = vec![0; content_length];
 
         stream.read_exact(&mut buffer)?;
-        body = buffer;
+        body = Some(buffer);
     }
 
     let request = HttpRequest {
@@ -125,7 +162,7 @@ fn read_request_from_stream(stream: &mut TcpStream) -> Result<HttpRequest, Error
         path,
         version,
         headers,
-        body: Some(body)
+        body
     };
 
     println!("
@@ -170,58 +207,78 @@ fn  read_meta(stream: &mut TcpStream) -> Result<Vec<String>, Error> {
     Ok(meta)
 }
 
-fn handle_get(request: &HttpRequest, stream: &mut TcpStream) -> std::io::Result<()> {
-    return match request.path.as_str() {
-        ROUTE_HOME => handle_home(stream),
-        ROUTE_USER_AGENT => handle_user_agent(request, stream),
-        path if path.starts_with(ROUTE_ECHO) => handle_echo(stream, path),
-        _ => handle_not_found(stream)
+fn handle_get(context: &mut HttpRequestContext) -> std::io::Result<()> {
+    return match context.request.path.as_str() {
+        ROUTE_HOME => handle_home(context),
+        ROUTE_USER_AGENT => handle_user_agent(context),
+        path if path.starts_with(ROUTE_ECHO) => handle_echo(context),
+        path if path.starts_with(ROUTE_FILES) => handle_files(context),
+        _ => handle_not_found(context)
     }
 }
 
 fn handle_bad_request(stream: &mut TcpStream) -> std::io::Result<()> {
-    let response = HttpResponse::new(400, MSG_BAD_REQUEST).to_bytes();
+    let response = HttpResponse::new(400, MSG_BAD_REQUEST, None, None).to_bytes();
     return stream.write_all(&response);
 }
 
-fn handle_echo(stream: &mut TcpStream, path: &str) -> std::io::Result<()> {
-    let echo_message = match path.get(ROUTE_ECHO.len()..) {
+fn handle_echo(context: &mut HttpRequestContext) -> std::io::Result<()> {
+    let echo_message = match context.request.path.get(ROUTE_ECHO.len()..) {
         Some(message) => message,
         None => ""
     };
 
     let headers = [HttpHeader::new("Content-Type", "text/plain")];
-    let response = HttpResponse::new_with_body(200, MSG_OK, &headers, echo_message.as_bytes()).to_bytes();
+    let response = HttpResponse::new(200, MSG_OK, Some(&headers), Some(echo_message.as_bytes())).to_bytes();
 
-    return stream.write_all(&response);
+    return context.stream.write_all(&response);
 }
 
 fn handle_error(stream: &mut TcpStream, error: &Error) -> std::io::Result<()> {
-    let headers = [HttpHeader::new("Content-Type", "text/plain")];
+    let headers = [HttpHeader::new(&http::HDR_CONTENT_TYPE, http::CT_TEXT_PLAIN)];
     let error_message = error.to_string();
-    let response = HttpResponse::new_with_body(500, MSG_INTERNAL_SERVER_ERROR, &headers, error_message.as_bytes()).to_bytes();
+    let response = HttpResponse::new(500, MSG_INTERNAL_SERVER_ERROR, Some(&headers), Some(error_message.as_bytes())).to_bytes();
 
     return stream.write_all(&response);
 }
 
-fn handle_not_found(stream: &mut TcpStream) -> std::io::Result<()> {
-    let response = HttpResponse::new(404, MSG_NOT_FOUND).to_bytes();
-    return stream.write_all(&response);
+fn handle_files(context: &mut HttpRequestContext) -> std::io::Result<()> {
+    let file_name = match context.request.path.get(ROUTE_FILES.len()..) {
+        Some(f) => f,
+        None => ""
+    };
+
+    let file_path = context.file_directory.join(file_name);
+
+    if file_path.exists() == false {
+        return handle_not_found(context);
+    }
+
+    let file_bytes = fs::read(&file_path).unwrap();
+    let headers = [HttpHeader::new(&http::HDR_CONTENT_TYPE, http::CT_APP_OCTET_STREAM)];
+    let response = HttpResponse::new(200, MSG_OK, Some(&headers), Some(&file_bytes)).to_bytes();
+
+    return context.stream.write_all(&response);
 }
 
-fn handle_home(stream: &mut TcpStream) -> std::io::Result<()> {
-    let response = HttpResponse::new(200, MSG_OK).to_bytes();
-    return stream.write_all(&response);
+fn handle_not_found(context: &mut HttpRequestContext) -> std::io::Result<()> {
+    let response = HttpResponse::new(404, MSG_NOT_FOUND, None, None).to_bytes();
+    return context.stream.write_all(&response);
 }
 
-fn handle_user_agent(request: &HttpRequest, stream: &mut TcpStream) -> std::io::Result<()> {
-    let user_agent = match request.get_header("user-agent") {
+fn handle_home(context: &mut HttpRequestContext) -> std::io::Result<()> {
+    let response = HttpResponse::new(200, MSG_OK, None, None).to_bytes();
+    return context.stream.write_all(&response);
+}
+
+fn handle_user_agent(context: &mut HttpRequestContext) -> std::io::Result<()> {
+    let user_agent = match context.request.get_header(&http::HDR_USER_AGENT) {
         Some(header) => header.value.as_str(),
         None => "Unknown"
     };
 
-    let headers = [HttpHeader::new("Content-Type", "text/plain")];
-    let response = HttpResponse::new_with_body(200, MSG_OK, &headers, user_agent.as_bytes()).to_bytes();
+    let headers = [HttpHeader::new(&http::HDR_CONTENT_TYPE, &http::CT_TEXT_PLAIN)];
+    let response = HttpResponse::new(200, MSG_OK, Some(&headers), Some(user_agent.as_bytes())).to_bytes();
 
-    return stream.write_all(&response);
+    return context.stream.write_all(&response);
 }

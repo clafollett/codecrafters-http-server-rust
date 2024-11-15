@@ -10,7 +10,10 @@
             "name": "Debug (LLDB)",
             "preLaunchTask": "rust: build",
             "program": "${workspaceFolder}/bin/debug/codecrafters-http-server",
-            "args": [],
+            "args": [
+                "--directory",
+                "${workspaceFolder}/bin/file_directory"
+            ],
             "cwd": "${workspaceFolder}"
         }
     ]

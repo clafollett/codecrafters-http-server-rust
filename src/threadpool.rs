@@ -46,18 +46,15 @@ struct Worker {
 
 impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<Receiver<Task>>>) -> Worker {
-        let handle = thread::spawn(move || loop {
+        let thread_name = format!("Thread-{}", id);
+        let handle = thread::Builder::new().name(thread_name).spawn(move || loop {
             let task = receiver.lock().unwrap().recv().unwrap();
             task();
-        });
+        }).unwrap();
 
         let worker = Worker { id, handle };
 
-        print!(
-            "Worker {}:{} started a new task\n",
-            worker.id,
-            worker.handle.thread().name().unwrap()
-        );
+        println!("Worker-{}:{} created", worker.id, worker.handle.thread().name().unwrap());
 
         return worker;
     }
