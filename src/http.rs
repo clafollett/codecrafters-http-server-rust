@@ -1,5 +1,11 @@
 #![allow(dead_code)]
-use std::{fmt, net::TcpStream, path::PathBuf};
+use flate2::{
+    Compression,
+    write::GzEncoder
+};
+
+
+use std::{fmt, io::Write, net::TcpStream, path::PathBuf};
 
 const CRLF: &str = "\r\n";
 
@@ -153,6 +159,13 @@ impl<'a> HttpResponse<'a> {
         self.headers.iter_mut().position(|h| h.name.to_lowercase() == name.to_lowercase())
     }
 
+    pub fn get_header_value(&mut self, name: &str) -> Option<&str> {
+        return match self.get_header(name) {
+            Some(header) => Some(header.value.as_str()),
+            None => None
+        }
+    }
+
     pub fn get_body(&self) -> Option<&[u8]> {
         return self.body.as_deref();
     }
@@ -182,18 +195,25 @@ impl<'a> HttpResponse<'a> {
 
             return;
         }
-        
-        let content_length = body.len().to_string();
 
-        self.set_or_add_header_value(HDR_CONTENT_LENGTH, content_length);
+        let mut body = body;
 
         if let Some(context) = self.context {
             if context.request.supports_encoding(ENCODING_GZIP) {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+
+                // TODO: Handle errors better here
+                encoder.write_all(&body).unwrap();
+                body = encoder.finish().unwrap();
+                
                 self.set_or_add_header_value(HDR_CONTENT_ENCODING, ENCODING_GZIP.into());
             }
         }
 
-        self.body = Some(body.to_vec());
+        let content_length = body.len().to_string();
+        self.set_or_add_header_value(HDR_CONTENT_LENGTH, content_length);
+
+        self.body = Some(body);
     }
 
     pub fn to_bytes(&self) -> Vec::<u8> {
@@ -218,6 +238,6 @@ impl<'a> HttpResponse<'a> {
         response_bytes.extend_from_slice(header_lines.as_bytes());
         response_bytes.extend_from_slice(body.as_slice());
         
-        return response_bytes.to_vec();
+        return response_bytes;
     }
 }
