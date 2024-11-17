@@ -60,6 +60,19 @@ impl HttpRequest {
     pub fn get_header(&self, name: &str) -> Option<&HttpHeader> {
         self.headers.iter().find(|h| h.name.to_lowercase() == name.to_lowercase())
     }
+
+    pub fn supports_encoding(&self, encoding: &str) -> bool {
+        if let Some(header) = self.get_header(HDR_ACCEPT_ENCODING) {
+            let encoding_index = header.value.to_lowercase()
+                .split(",")
+                .map(|s| s.trim())
+                .position(|e| e == encoding.to_lowercase());
+
+            return encoding_index.is_some();
+        }
+
+        return false;
+    }
 }
 
 #[derive(Debug)]
@@ -175,10 +188,8 @@ impl<'a> HttpResponse<'a> {
         self.set_or_add_header_value(HDR_CONTENT_LENGTH, content_length);
 
         if let Some(context) = self.context {
-            if let Some(header) = context.request.get_header(HDR_ACCEPT_ENCODING) {
-                if header.value.to_lowercase().contains(ENCODING_GZIP) {
-                    self.set_or_add_header_value(HDR_CONTENT_ENCODING, ENCODING_GZIP.into());
-                }
+            if context.request.supports_encoding(ENCODING_GZIP) {
+                self.set_or_add_header_value(HDR_CONTENT_ENCODING, ENCODING_GZIP.into());
             }
         }
 
