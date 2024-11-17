@@ -13,6 +13,11 @@ use crate::threadpool::ThreadPool;
 
 use clap::Parser;
 
+use http::{
+    CT_TEXT_PLAIN,
+    HDR_CONTENT_TYPE
+};
+
 use std::{
     self,
     env,
@@ -84,7 +89,7 @@ fn main() {
                 stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
 
                 pool.queue(move || {
-                    handle_request(&stream, &file_directory).unwrap();
+                    handle_request(stream, file_directory).unwrap();
                 });
             }
             Err(e) => {
@@ -95,37 +100,41 @@ fn main() {
     }
 }
 
-fn handle_request(stream: &TcpStream, file_directory: &PathBuf) -> std::io::Result<()> {
-    let mut stream = stream.try_clone().unwrap();
-    let request_result = read_request_from_stream(&mut stream);
+fn handle_request(stream: TcpStream, file_directory: PathBuf) -> std::io::Result<()> {
+    let mut stream = stream;
+    let mut reader = BufReader::new(&mut stream);
+    let request_result = read_request(&mut reader);
     
     if request_result.is_err() {
         let error = request_result.err().unwrap();
         return match error.kind() {
             ErrorKind::InvalidInput => handle_bad_request(&mut stream),
-            _ => handle_error(&mut stream, &error)
+            _ => {
+                handle_error(&mut stream, &error)
+            }
         }
     };
 
+    let context_stream = stream.try_clone().unwrap();
+
     let mut context = HttpRequestContext::new(
-        &stream,
+        request_result.unwrap(),
+        context_stream,
         file_directory,
-        &request_result.unwrap()
     );
 
     return match context.request.method.as_str() {
         http::METHOD_GET => handle_get(&mut context),
         http::METHOD_POST => handle_post(&mut context),
         _ => {
-            let response = HttpResponse::new(405, MSG_METHOD_NOT_ALLOWED, None, None).to_bytes();
+            let response = HttpResponse::new(&context, 405, MSG_METHOD_NOT_ALLOWED.into(), None, None).to_bytes();
             return stream.write_all(&response);
         }
     };
 }
 
-fn read_request_from_stream(stream: &mut TcpStream) -> Result<HttpRequest, Error> {
-    let mut reader = BufReader::new(stream);
-    let meta = read_meta(&mut reader)?;
+fn read_request(reader: &mut BufReader<&mut TcpStream>) -> Result<HttpRequest, Error> {
+    let meta = read_meta(reader)?;
 
     assert!(meta.len() > 0);
 
@@ -227,7 +236,7 @@ fn handle_post(context: &mut HttpRequestContext) -> std::io::Result<()> {
 }
 
 fn handle_bad_request(stream: &mut TcpStream) -> std::io::Result<()> {
-    let response = HttpResponse::new(400, MSG_BAD_REQUEST, None, None).to_bytes();
+    let response = HttpResponse::with_no_context(400, MSG_BAD_REQUEST.into(), None, None).to_bytes();
     return stream.write_all(&response);
 }
 
@@ -237,16 +246,16 @@ fn handle_echo(context: &mut HttpRequestContext) -> std::io::Result<()> {
         None => ""
     };
 
-    let headers = [HttpHeader::new("Content-Type", "text/plain")];
-    let response = HttpResponse::new(200, MSG_OK, Some(&headers), Some(echo_message.as_bytes())).to_bytes();
+    let headers = vec![HttpHeader::new(HDR_CONTENT_TYPE.into(), CT_TEXT_PLAIN.into())];
+    let response = HttpResponse::new(&context, 200, MSG_OK.into(), Some(headers), Some(echo_message.into())).to_bytes();
 
     return context.stream.write_all(&response);
 }
 
 fn handle_error(stream: &mut TcpStream, error: &Error) -> std::io::Result<()> {
-    let headers = [HttpHeader::new(&http::HDR_CONTENT_TYPE, http::CT_TEXT_PLAIN)];
+    let headers = vec![HttpHeader::new(http::HDR_CONTENT_TYPE.into(), http::CT_TEXT_PLAIN.into())];
     let error_message = error.to_string();
-    let response = HttpResponse::new(500, MSG_INTERNAL_SERVER_ERROR, Some(&headers), Some(error_message.as_bytes())).to_bytes();
+    let response = HttpResponse::with_no_context(500, MSG_INTERNAL_SERVER_ERROR.into(), Some(headers), Some(error_message.into())).to_bytes();
 
     return stream.write_all(&response);
 }
@@ -264,8 +273,8 @@ fn handle_get_file(context: &mut HttpRequestContext) -> std::io::Result<()> {
     }
 
     let file_bytes = fs::read(&file_path).unwrap();
-    let headers = [HttpHeader::new(&http::HDR_CONTENT_TYPE, http::CT_APP_OCTET_STREAM)];
-    let response = HttpResponse::new(200, MSG_OK, Some(&headers), Some(&file_bytes)).to_bytes();
+    let headers = vec![HttpHeader::new(http::HDR_CONTENT_TYPE.into(), http::CT_APP_OCTET_STREAM.into())];
+    let response = HttpResponse::new(&context, 200, MSG_OK.into(), Some(headers), Some(file_bytes)).to_bytes();
 
     return context.stream.write_all(&response);
 }
@@ -289,18 +298,18 @@ fn handle_post_file(context: &mut HttpRequestContext) -> std::io::Result<()> {
         fs::write(file_path, body).unwrap();
     }
 
-    let response = HttpResponse::new(201, MSG_CREATED, None, None).to_bytes();
+    let response = HttpResponse::new(&context, 201, MSG_CREATED.into(), None, None).to_bytes();
 
     return context.stream.write_all(&response);
 }
 
 fn handle_not_found(context: &mut HttpRequestContext) -> std::io::Result<()> {
-    let response = HttpResponse::new(404, MSG_NOT_FOUND, None, None).to_bytes();
+    let response = HttpResponse::new(&context, 404, MSG_NOT_FOUND.into(), None, None).to_bytes();
     return context.stream.write_all(&response);
 }
 
 fn handle_home(context: &mut HttpRequestContext) -> std::io::Result<()> {
-    let response = HttpResponse::new(200, MSG_OK, None, None).to_bytes();
+    let response = HttpResponse::new(&context, 200, MSG_OK.into(), None, None).to_bytes();
     return context.stream.write_all(&response);
 }
 
@@ -310,8 +319,8 @@ fn handle_user_agent(context: &mut HttpRequestContext) -> std::io::Result<()> {
         None => "Unknown"
     };
 
-    let headers = [HttpHeader::new(&http::HDR_CONTENT_TYPE, &http::CT_TEXT_PLAIN)];
-    let response = HttpResponse::new(200, MSG_OK, Some(&headers), Some(user_agent.as_bytes())).to_bytes();
+    let headers = vec![HttpHeader::new(http::HDR_CONTENT_TYPE.into(), http::CT_TEXT_PLAIN.into())];
+    let response = HttpResponse::new(&context, 200, MSG_OK.into(), Some(headers), Some(user_agent.into())).to_bytes();
 
     return context.stream.write_all(&response);
 }

@@ -3,19 +3,24 @@ use std::{fmt, net::TcpStream, path::PathBuf};
 
 const CRLF: &str = "\r\n";
 
-// HTTP Header Names
-pub const HDR_CONTENT_LENGTH: &'static str = "Content-Length";
-pub const HDR_CONTENT_TYPE: &'static str = "Content-Type";
-pub const HDR_USER_AGENT: &'static str = "User-Agent";
-
 // HTTP Content Types
-pub const CT_TEXT_PLAIN: &'static str = "text/plain";
-pub const CT_APP_OCTET_STREAM: &'static str = "application/octet-stream";
+pub const CT_TEXT_PLAIN: &str = "text/plain";
+pub const CT_APP_OCTET_STREAM: &str = "application/octet-stream";
 
-pub const METHOD_GET: &'static str = "GET";
-pub const METHOD_POST: &'static str = "POST";
-// pub const METHOD_PUT: &'static str = "PUT";
-// pub const METHOD_DELETE: &'static str = "DELETE";
+// HTTP Encoding Types
+pub const ENCODING_GZIP: &str = "gzip";
+
+// HTTP Header Names
+pub const HDR_ACCEPT_ENCODING: &str = "Accept-Encoding";
+pub const HDR_CONTENT_ENCODING: &str = "Content-Encoding";
+pub const HDR_CONTENT_LENGTH: &str = "Content-Length";
+pub const HDR_CONTENT_TYPE: &str = "Content-Type";
+pub const HDR_USER_AGENT: &str = "User-Agent";
+
+pub const METHOD_GET: &str = "GET";
+pub const METHOD_POST: &str = "POST";
+// pub const METHOD_PUT: &str = "PUT";
+// pub const METHOD_DELETE: &str = "DELETE";
 
 #[derive(Clone)]
 #[derive(Debug)]
@@ -25,10 +30,10 @@ pub struct HttpHeader {
 }
 
 impl HttpHeader {
-    pub fn new(name: &str, value: &str) -> HttpHeader {
+    pub fn new(name: String, value: String) -> HttpHeader {
         HttpHeader {
-            name: name.to_string(),
-            value: value.to_string()
+            name,
+            value
         }
     }
 }
@@ -36,7 +41,7 @@ impl HttpHeader {
 impl fmt::Display for HttpHeader {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         let str = format!("{}: {}", self.name, self.value);
-        fmt.write_str(str.as_str())?;
+        fmt.write_str(&str)?;
         return Ok(());
     }
 }
@@ -52,48 +57,70 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
-    pub fn get_header(&mut self, name: &str) -> Option<&mut HttpHeader> {
-        self.headers.iter_mut().find(|h| h.name.to_lowercase() == name.to_lowercase())
+    pub fn get_header(&self, name: &str) -> Option<&HttpHeader> {
+        self.headers.iter().find(|h| h.name.to_lowercase() == name.to_lowercase())
     }
 }
 
 #[derive(Debug)]
 pub struct HttpRequestContext {
-    pub file_directory: PathBuf,
     pub request: HttpRequest,
-    pub stream: TcpStream
+    pub stream: TcpStream,
+    pub file_directory: PathBuf
 }
 
 impl HttpRequestContext {
-    pub fn new(stream: &TcpStream, file_directory: &PathBuf, request: &HttpRequest) -> HttpRequestContext {
+    pub fn new(request: HttpRequest, stream: TcpStream, file_directory: PathBuf, ) -> HttpRequestContext {
         HttpRequestContext {
-            file_directory: file_directory.clone(),
-            request: request.clone(),
-            stream: stream.try_clone().unwrap()
+            request: request,
+            stream: stream,
+            file_directory
         }
     }
 }
 
 #[derive(Clone)]
 #[derive(Debug)]
-pub struct HttpResponse {
+pub struct HttpResponse<'a> {
     pub status_code: u16,
     pub status_message: String,
     pub headers: Vec<HttpHeader>,
-    body: Option<Vec<u8>>
+    body: Option<Vec<u8>>,
+    context: Option<&'a HttpRequestContext>
 }
 
-impl HttpResponse {
-    pub fn new(status_code: u16, status_message: &str, headers: Option<&[HttpHeader]>, body: Option<&[u8]>) -> HttpResponse {
+impl<'a> HttpResponse<'a> {
+    pub fn new(context: &'a HttpRequestContext, status_code: u16, status_message: String, headers: Option<Vec<HttpHeader>>, body: Option<Vec<u8>>) -> HttpResponse {
         let mut response = HttpResponse {
             status_code,
-            status_message: status_message.to_string(),
+            status_message,
             headers: match headers {
-                Some(h) => h.to_vec(),
+                Some(h) => h,
                 None => Vec::<HttpHeader>::new()
             },
             // Set None now and we will use the set_body method and it's logic later
-            body: None
+            body: None,
+            context: Some(context)
+        };
+
+        if body.is_some() {
+            response.set_body(body.unwrap());
+        }
+
+        return response;
+    }
+
+    pub fn with_no_context(status_code: u16, status_message: String, headers: Option<Vec<HttpHeader>>, body: Option<Vec<u8>>) -> HttpResponse<'a> {
+        let mut response = HttpResponse {
+            status_code,
+            status_message,
+            headers: match headers {
+                Some(h) => h,
+                None => Vec::<HttpHeader>::new()
+            },
+            // Set None now and we will use the set_body method and it's logic later
+            body: None,
+            context: None
         };
 
         if body.is_some() {
@@ -104,7 +131,9 @@ impl HttpResponse {
     }
 
     pub fn get_header(&mut self, name: &str) -> Option<&mut HttpHeader> {
-        self.headers.iter_mut().find(|h| h.name.to_lowercase() == name.to_lowercase())
+        self.headers.iter_mut().find(|h| 
+            h.name.to_lowercase() == name.to_lowercase()
+        )
     }
 
     pub fn get_header_index(&mut self, name: &str) -> Option<usize> {
@@ -115,29 +144,47 @@ impl HttpResponse {
         return self.body.as_deref();
     }
 
-    pub fn set_body(&mut self, body: &[u8]) {
+    pub fn remove_header(&mut self, name: &str) {
+        if let Some(index) = self.get_header_index(name) {
+            self.headers.remove(index);
+        }
+    }
+
+    pub fn set_or_add_header_value(&mut self, header_name: &str, value: String) {
+        if let Some(header) = self.get_header(header_name) {
+            header.value = value;
+        } else {
+            self.headers.push(HttpHeader::new(header_name.into(), value));
+        }
+    }
+
+    pub fn set_body(&mut self, body: Vec<u8>) {
 
         // If we doon't have a body, we need to remove the Content-Length header
         if body.len() == 0 {
             self.body = None;
 
-            if let Some(index) = self.get_header_index("Content-Length") {
-                self.headers.remove(index);
-            }
+            self.remove_header(HDR_CONTENT_LENGTH);
+            self.remove_header(HDR_CONTENT_ENCODING);
 
             return;
         }
         
-        self.body = Some(body.to_vec());
         let content_length = body.len().to_string();
 
-        if let Some(header) = self.get_header("Content-Length") {
-            header.value = content_length;
-        } else {
-            self.headers.push(HttpHeader::new("Content-Length", &content_length));
+        self.set_or_add_header_value(HDR_CONTENT_LENGTH, content_length);
+
+        if let Some(context) = self.context {
+            if let Some(header) = context.request.get_header(HDR_ACCEPT_ENCODING) {
+                if header.value.to_lowercase().contains(ENCODING_GZIP) {
+                    self.set_or_add_header_value(HDR_CONTENT_ENCODING, ENCODING_GZIP.into());
+                }
+            }
         }
+
+        self.body = Some(body.to_vec());
     }
-    
+
     pub fn to_bytes(&self) -> Vec::<u8> {
         let response_line = format!("HTTP/1.1 {} {}{CRLF}", self.status_code, self.status_message);
         let mut header_lines = String::with_capacity(self.headers.len() * 128);
