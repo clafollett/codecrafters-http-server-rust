@@ -1,15 +1,18 @@
 use std::{
-    sync::{mpsc::{self, Receiver}, Arc, Mutex},
-    thread::{self, JoinHandle}
+    sync::{
+        mpsc::{self, Receiver},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
 };
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Task>
+    sender: mpsc::Sender<Task>,
 }
 
 impl ThreadPool {
-    pub fn new (size: usize) -> ThreadPool{
+    pub fn new(size: usize) -> ThreadPool {
         assert!(size > 0);
 
         let (sender, receiver) = mpsc::channel();
@@ -20,10 +23,7 @@ impl ThreadPool {
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
-        let pool = ThreadPool {
-            workers,
-            sender
-        };
+        let pool = ThreadPool { workers, sender };
 
         print!("ThreadPool created: size={}\n", pool.workers.len());
 
@@ -47,14 +47,21 @@ struct Worker {
 impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<Receiver<Task>>>) -> Worker {
         let thread_name = format!("Thread-{}", id);
-        let handle = thread::Builder::new().name(thread_name).spawn(move || loop {
-            let task = receiver.lock().unwrap().recv().unwrap();
-            task();
-        }).unwrap();
+        let handle = thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || loop {
+                let task = receiver.lock().unwrap().recv().unwrap();
+                task();
+            })
+            .unwrap();
 
         let worker = Worker { id, handle };
 
-        println!("Worker-{}:{} created", worker.id, worker.handle.thread().name().unwrap());
+        println!(
+            "Worker-{}:{} created",
+            worker.id,
+            worker.handle.thread().name().unwrap()
+        );
 
         return worker;
     }
